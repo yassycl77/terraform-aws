@@ -1,85 +1,183 @@
-# EC2 Ubuntu avec Terraform
+# Terraform AWS : laboratoire d'industrialisation
 
-Projet a placer dans votre depot Git puis a cloner sur Ubuntu. Aucun depot distant n'est cree et aucune ressource AWS n'a ete deployee lors de la preparation.
+Ubuntu 24.04 amd64, T3, VPC dedie, sous-reseau public, SSH depuis une IPv4 /32,
+IMDSv2 obligatoire et disque gp3 chiffre. Les ressources AWS sont facturables.
+Ce laboratoire ne fournit pas de haute disponibilite ni de sauvegarde automatique.
 
-## Ressources
+## Organisation
 
-Region eu-west-3 (Paris), Ubuntu Server 24.04 LTS amd64, t3.micro, disque gp3 chiffre de 20 Gio, VPC dedie, sous-reseau public, passerelle Internet et IPv4 publique attribuee automatiquement. SSH est le seul port entrant, limite a une IPv4 /32. Aucun logiciel applicatif n'est installe. IMDSv2 est obligatoire.
+- Racine : environnement **dev existant**, conserve ici pour garder son etat.
+- `modules/network` : VPC, sous-reseau, Internet Gateway et routage.
+- `modules/ec2` : instance, disque, cle publique et regles SSH.
+- `environments/prod` : exemple independant non deploye, avec ses propres variables et etat.
+- `bootstrap` : bucket S3 pour les etats, gere dans un etat separe.
+- `.github/workflows/terraform.yml` : formatage, validation et tests simules sans acces AWS.
 
-L'instance, le disque EBS et l'IPv4 publique peuvent generer des frais. Aucune eligibilite a une offre gratuite n'est supposee. L'adresse publique peut changer apres un arret/redemarrage. Ce projet convient a une instance simple ; il ne fournit ni sauvegarde ni haute disponibilite.
+En entreprise, completer l'isolation par des comptes et roles distincts. Les noms et tags
+ne constituent pas une frontiere de permissions.
 
-## Prerequis Ubuntu
+## Prerequis
 
-- Git, OpenSSH client, Terraform >= 1.6 et < 2 et AWS CLI v2.
-- Installer Terraform : https://developer.hashicorp.com/terraform/install
-- Installer AWS CLI : https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
-- Identite AWS autorisee a gerer les ressources EC2/VPC et les tags, a decrire les zones et a lire le parametre public SSM de Canonical. Les controles de votre organisation peuvent limiter ces operations.
-
-Configurer votre profil AWS (SSO recommande si disponible dans votre organisation) :
+Terraform >= 1.10 et < 2, Git, AWS CLI v2 et OpenSSH. La CI utilise Terraform 1.10.5.
+Le profil doit gerer EC2/VPC et lire le parametre SSM Canonical si `ami_id` n'est pas fourni.
+Le bootstrap et le backend necessitent aussi des droits S3. Ne jamais utiliser de cle root.
 
 ```bash
-aws configure sso --profile terraform
-aws sso login --profile terraform
 export AWS_PROFILE=terraform
 aws sts get-caller-identity
 ```
 
-Vous pouvez aussi utiliser un profil AWS CLI deja configure. Aucune cle AWS ne doit etre ajoutee aux fichiers Terraform.
+## Migration de l'instance existante sur Ubuntu
 
-## Premier deploiement
-
-Apres publication dans votre propre depot :
-
-```bash
-git clone <URL_DE_VOTRE_DEPOT>
-cd <DOSSIER_DU_DEPOT>
-```
-
-Depuis le dossier contenant main.tf, creer une cle dediee si elle n'existe pas deja (choisir une phrase de passe) :
+Rester dans `/opt/terraform/terraform-aws`, avec le meme compte et le meme etat.
+Ne pas lancer d'operations concurrentes. Avant de mettre a jour le code :
 
 ```bash
-ssh-keygen -t ed25519 -f "$HOME/.ssh/terraform-ec2"
-cp terraform.tfvars.example terraform.tfvars
-nano terraform.tfvars
+cd /opt/terraform/terraform-aws
+umask 077
+terraform state pull > ../terraform-aws-before-modules.tfstate.backup
+aws ec2 describe-instances \
+  --instance-ids "$(terraform output -raw instance_id)" \
+  --region eu-west-3 \
+  --query 'Reservations[0].Instances[0].[ImageId,Placement.AvailabilityZone]' \
+  --output text
+git status
+git pull --ff-only
 ```
 
-Remplacer `203.0.113.10/32` par votre IPv4 publique suivie de `/32`. Cette adresse d'exemple ne permet pas votre connexion. Adapter le chemin de la cle publique si necessaire ; la cle privee reste sur votre machine. En cas de changement d'IP publique, mettre a jour cette variable puis relancer plan et apply.
+Si `git pull` est bloque par un formatage local de main.tf, examiner `git diff` et conserver
+les changements utiles avant de resoudre le conflit. Ne pas reinitialiser aveuglement le depot.
+
+Dans le fichier **existant** `terraform.tfvars`, conserver les valeurs actuelles (nom, type,
+disque, cle et CIDR). Ajouter `ami_id` et `availability_zone` avec les valeurs relevees.
+Cela evite qu'une nouvelle AMI Canonical ou un changement de zone ne remplace l'instance.
+Ne pas ecraser les variables existantes avec le fichier d'exemple.
+
+```hcl
+environment = "dev"
+owner       = "platform"
+# Remplacer par les vraies valeurs relevees :
+# ami_id            = "ami-0123456789abcdef0"
+# availability_zone = "eu-west-3a"
+```
 
 ```bash
 terraform init
-terraform fmt -check
+terraform fmt -check -recursive
 terraform validate
-terraform plan -out=deploy.tfplan
-terraform apply deploy.tfplan
+terraform plan -out=migration.tfplan
+```
+
+Les dix blocs de `moved.tf` reassocient les ressources aux modules. Le plan attendu
+comporte **0 ajout et 0 destruction**, avec eventuellement une mise a jour des tags
+Environment/Owner. Si le plan annonce une creation, destruction ou un remplacement,
+ne pas appliquer : verifier etat, AMI, zone et variables. Seul le plan sur l'etat reel
+peut confirmer l'absence de remplacement.
+
+Apres examen du plan :
+
+```bash
+terraform apply migration.tfplan
+terraform output
 ssh -i "$HOME/.ssh/terraform-ec2" "$(terraform output -raw ssh_destination)"
 ```
 
-Examiner le plan avant apply : le plan sauvegarde est applique sans nouvelle confirmation. Attendre un peu si SSH n'est pas encore disponible au premier demarrage.
+Conserver les blocs moved pour les copies qui n'ont pas migre. Ne pas reutiliser un ancien
+`deploy.tfplan` apres changement du code. Sauvegarder les donnees utiles avant toute operation.
 
-Conserver et versionner `.terraform.lock.hcl`, genere par init, pour verrouiller les versions des fournisseurs. Ne pas versionner terraform.tfvars, les plans, l'etat ou les cles privees ; le .gitignore les exclut.
+## Nouvelle installation
 
-## Etat et changements
+```bash
+git clone https://github.com/yassycl77/terraform-aws.git
+cd terraform-aws
+# Creer uniquement si cette cle n'existe pas deja.
+ssh-keygen -t ed25519 -f "$HOME/.ssh/terraform-ec2"
+cp terraform.tfvars.example terraform.tfvars
+```
 
-L'etat est local dans terraform.tfstate : le conserver avec soin, avec sa sauvegarde, hors du depot. Ne pas supprimer l'etat avant la destruction. Ne pas lancer plusieurs operations simultanees depuis des copies differentes. Un backend S3 avec verrouillage sera preferable pour un usage partage.
+Renseigner l'IPv4 publique du poste SSH suivie de `/32` et le chemin de la cle publique.
+Choisir idealement une AMI Ubuntu amd64 de la region dans `ami_id`. Sans cette variable,
+la recherche Canonical courante peut provoquer un remplacement lors d'une mise a jour.
+Le disque racine est supprime avec l'instance. Aucune cle privee ne doit entrer dans Terraform.
 
-Le parametre Canonical fournit l'AMI stable courante. Une nouvelle AMI peut provoquer un remplacement de l'instance lors d'un futur plan. Toujours examiner le plan ; le disque racine est supprime avec l'instance. Sauvegarder les donnees utiles avant remplacement ou destruction.
+```bash
+terraform init
+terraform validate
+terraform plan -out=deploy.tfplan
+terraform apply deploy.tfplan
+```
+
+Examiner le plan : son application ne demande pas de nouvelle confirmation. Versionner les
+`.terraform.lock.hcl` de chaque environnement. Ne publier ni etat, ni plan, ni variables privees.
+
+## Backend S3 : activation apres la migration des modules
+
+Le backend est prepare mais desactive par defaut : l'etat existant reste local.
+Avec un profil autorise pour S3, choisir un nom de bucket globalement unique :
+
+```bash
+terraform -chdir=bootstrap init
+terraform -chdir=bootstrap plan -var='state_bucket_name=NOM-UNIQUE-DU-BUCKET' -out=bootstrap.tfplan
+terraform -chdir=bootstrap apply bootstrap.tfplan
+cp backend.tf.example backend.tf
+cp backend.hcl.example backend.hcl
+```
+
+Modifier backend.hcl avec le bucket cree et conserver la cle dev. Le bucket a le
+versionnement, le chiffrement, le blocage public, une politique TLS et prevent_destroy.
+L'etat bootstrap reste local et doit etre sauvegarde hors Git.
+
+Avec une nouvelle sauvegarde de l'etat dev et sans operation concurrente :
+
+```bash
+terraform init -migrate-state -backend-config=backend.hcl
+terraform state list
+terraform plan
+```
+
+Accepter la copie apres verification du bucket et de la cle. Ne pas remplacer cette
+migration par `-reconfigure`. Le verrouillage natif S3 exige Terraform >= 1.10.
+Le role operateur doit pouvoir lister le bucket, lire/ecrire l'etat, et lire/ecrire/supprimer
+son objet `.tflock`. Les permissions de creation du bucket sont distinctes de son utilisation.
+
+Pour prod, utiliser les exemples dans environments/prod, une cle d'etat /prod/ et des
+variables propres. Ne jamais copier l'etat dev dans prod. Aucun environnement prod
+n'est cree automatiquement.
+
+## CI et tests
+
+Les push sur main et pull requests executent fmt, init sans backend et validate sur les
+configurations, ainsi que des tests simules du module EC2 (IMDSv2, chiffrement, restriction
+SSH et rejet d'une instance ARM). Ils ne prouvent pas les permissions ni la capacite AWS.
+
+```bash
+terraform -chdir=modules/ec2 init -backend=false
+terraform -chdir=modules/ec2 test
+```
+
+La CI n'execute ni plan AWS ni apply. Le lint, le scanner de securite et le deploiement OIDC
+sont des etapes suivantes. Pour un deploiement GitHub : role OIDC limite au depot,
+backend distant actif et environnement GitHub avec approbation ; pas de cle AWS permanente.
 
 ## Nettoyage
 
-Depuis le meme dossier, avec le meme etat et le meme compte/profil AWS :
+Depuis l'environnement concerne et avec son etat :
 
 ```bash
 terraform plan -destroy -out=destroy.tfplan
 terraform apply destroy.tfplan
 ```
 
-Cette operation supprime toutes les ressources gerees par ce projet et les donnees du disque racine.
+Cela detruit l'instance, ses donnees et son reseau, mais pas le bootstrap S3.
 
-## Verification de cette livraison
+## References
 
-Les fichiers ont ete prepares sans execution de Terraform : le binaire n'est pas disponible dans l'environnement de preparation. Aucun terraform init/validate/plan ni test AWS n'a ete execute. Executer les commandes ci-dessus sur Ubuntu avant le deploiement.
+- https://developer.hashicorp.com/terraform/language/modules/configuration
+- https://developer.hashicorp.com/terraform/language/backend/s3
+- https://github.com/hashicorp/setup-terraform
 
-## Documentation
+## Verification de cette revision
 
-- Parametres des AMI officielles Ubuntu : https://ubuntu.com/aws/docs/aws-how-to/instances/build-cloudformation-templates/
-- Ressource EC2 Terraform : https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/instance
+Terraform 1.10.5 / fournisseur AWS 6.71.0 : fmt recursif et validation des cinq
+configurations reussis ; trois tests simules reussis. Aucun plan sur l'etat Ubuntu
+ni deploiement AWS execute depuis cet environnement.

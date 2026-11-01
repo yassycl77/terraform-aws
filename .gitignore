@@ -9,3 +9,7 @@ crash.*.log
 *.pem
 *.key
 .env
+
+backend.hcl
+*.tfstate.backup*
+*.plan.txt

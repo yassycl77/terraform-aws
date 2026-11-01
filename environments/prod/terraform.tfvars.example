@@ -1,0 +1,10 @@
+aws_region          = "eu-west-3"
+project_name        = "ubuntu-ec2-prod"
+instance_type       = "t3.micro"
+root_volume_size    = 20
+ssh_public_key_path = "~/.ssh/terraform-ec2.pub"
+# Remplacez cette adresse de documentation par votre IPv4 publique.
+ssh_allowed_cidr = "203.0.113.10/32"
+
+environment = "prod"
+owner = "platform"

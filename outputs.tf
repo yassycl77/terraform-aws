@@ -1,11 +1,9 @@
 output "instance_id" {
-  value = aws_instance.main.id
+  value = module.ec2.instance_id
 }
-
 output "public_ip" {
-  value = aws_instance.main.public_ip
+  value = module.ec2.public_ip
 }
-
 output "ssh_destination" {
-  value = "ubuntu@${aws_instance.main.public_ip}"
+  value = module.ec2.ssh_destination
 }

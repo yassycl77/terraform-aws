@@ -1,0 +1,31 @@
+name: Terraform validation
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        directory: [".", "bootstrap", "environments/prod", "modules/network", "modules/ec2"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+      - name: Format
+        run: terraform fmt -check -recursive
+      - name: Initialize without backend
+        working-directory: ${{ matrix.directory }}
+        run: terraform init -backend=false -input=false
+      - name: Validate
+        working-directory: ${{ matrix.directory }}
+        run: terraform validate -no-color
+      - name: Test EC2 security baseline
+        if: matrix.directory == 'modules/ec2'
+        working-directory: modules/ec2
+        run: terraform test -no-color
